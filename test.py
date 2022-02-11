@@ -21,8 +21,8 @@ def lengths_to_padding_mask(lens):
     return mask
 
 
-class SSNTLossTest(TestCase):
-    def _test_cif_train_ref(
+class CIFTest(TestCase):
+    def _test_cif_ref(
         self,
         input: Tensor,
         alpha: Tensor,
@@ -58,24 +58,38 @@ class SSNTLossTest(TestCase):
             source_lengths = (~padding_mask).sum(-1).long()
         else:
             source_lengths = input.new_full((B,), S, dtype=torch.long)
+
         for b in range(B):
             csum = 0
             src_idx = 0
             dst_idx = 0
+            tail_idx = 0
             while src_idx < source_lengths[b]:
                 if csum + alpha[b, src_idx] < beta:
                     csum += alpha[b, src_idx]
                     output[b, dst_idx] += alpha[b, src_idx] * input[b, src_idx]
+                    tail_idx = dst_idx
                     alpha[b, src_idx] = 0
                     src_idx += 1
                 else:
                     fire_w = beta - csum
                     alpha[b, src_idx] -= fire_w
                     output[b, dst_idx] += fire_w * input[b, src_idx]
+                    tail_idx = dst_idx
                     csum = 0
                     dst_idx += 1
 
-        return output[:, :T, :]
+            if target_lengths is None:
+                output[b, T] = 0
+            elif tail_idx > 0 and csum < (beta / (2 + eps)):
+                output[b, tail_idx:] = 0
+
+        # tail handling
+        if (target_lengths is not None) or output[:, T, :].eq(0).all():
+            # training time -> ignore tail
+            output = output[:, :T, :]
+
+        return output
 
     def _test_custom_cif_impl(
         self, *args, **kwargs
@@ -91,7 +105,7 @@ class SSNTLossTest(TestCase):
         beta=st.floats(0.5, 1.5),
         device=st.sampled_from(["cpu", "cuda"]),
     )
-    def test_ssnt_loss(self, B, T, S, C, beta, device):
+    def test_cif_impl(self, B, T, S, C, beta, device):
 
         assume(device == "cpu" or TEST_CUDA)
 
@@ -110,8 +124,8 @@ class SSNTLossTest(TestCase):
 
         padding_mask = lengths_to_padding_mask(source_lengths)
 
-        # reference
-        y = self._test_cif_train_ref(
+        # train
+        y = self._test_cif_ref(
             input,
             alpha,
             beta,
@@ -131,6 +145,28 @@ class SSNTLossTest(TestCase):
         np.testing.assert_allclose(
             x,
             y,
+            atol=1e-3,
+            rtol=1e-3,
+        )
+
+        # test
+        y2 = self._test_cif_ref(
+            input,
+            alpha,
+            beta,
+            padding_mask=padding_mask
+        ).cpu().detach().numpy()
+
+        x2, _, _ = self._test_custom_cif_impl(
+            input,
+            alpha,
+            beta,
+            padding_mask=padding_mask
+        )
+        x2 = x2.cpu().detach().numpy()
+        np.testing.assert_allclose(
+            x2,
+            y2,
             atol=1e-3,
             rtol=1e-3,
         )

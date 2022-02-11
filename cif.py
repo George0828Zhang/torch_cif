@@ -3,6 +3,23 @@ from typing import Optional, Tuple
 from torch import Tensor
 
 
+def prob_check(tensor, eps=1e-10, neg_inf=-1e8, logp=False):
+    assert not torch.isnan(tensor).any(), (
+        "Nan in a probability tensor."
+    )
+    # Add the eps here to prevent errors introduced by precision
+    if logp:
+        assert tensor.le(0).all() and tensor.ge(neg_inf).all(), (
+            "Incorrect values in a log-probability tensor"
+            ", -inf <= tensor <= 0"
+        )
+    else:
+        assert tensor.le(1.0 + eps).all() and tensor.ge(0.0 - eps).all(), (
+            "Incorrect values in a probability tensor"
+            ", 0.0 <= tensor <= 1.0"
+        )
+
+
 def cif_function(
     input: Tensor,
     alpha: Tensor,
@@ -36,7 +53,13 @@ def cif_function(
             Can be used to compute the quantity loss.
     """
     B, S, C = input.size()
+    assert tuple(alpha.size()) == (B, S), f"{alpha.size()} != {(B, S)}"
+    prob_check(alpha)
+
+    dtype = alpha.dtype
+    alpha = alpha.float()
     if padding_mask is not None:
+        padding_mask = padding_mask.bool()
         alpha = alpha.masked_fill(padding_mask, 0)
 
     if target_lengths is not None:
@@ -66,7 +89,15 @@ def cif_function(
         fire_num = right_idx - left_idx
         extra_weights = (fire_num - 1).clip(min=0)
 
-    # (B, S, C)
+        if right_idx.gt(T).any():
+            import pdb
+            pdb.set_trace()
+
+        assert right_idx.le(T).all(), f"{right_idx} <= {T}"
+        assert left_idx.le(T).all(), f"{right_idx} <= {T}"
+        assert extra_weights.ge(0).all()
+
+    # The extra entry in last dim is for
     output = input.new_zeros((B, T + 1, C))
 
     # right scatter
@@ -75,7 +106,7 @@ def cif_function(
         fire_mask,
         csum - right_idx.type_as(alpha) * beta,
         alpha
-    )
+    ).type_as(input)
     output.scatter_add_(
         1,
         right_idx.unsqueeze(-1).expand(-1, -1, C),
@@ -83,7 +114,9 @@ def cif_function(
     )
 
     # left scatter
-    left_weight = alpha - right_weight - extra_weights.type_as(alpha) * beta
+    left_weight = (
+        alpha - right_weight - extra_weights.type_as(alpha) * beta
+    ).type_as(input)
     output.scatter_add_(
         1,
         left_idx.unsqueeze(-1).expand(-1, -1, C),
@@ -91,7 +124,7 @@ def cif_function(
     )
 
     # extra scatters
-    if extra_weights.any():
+    if extra_weights.ge(0).any():
         extra_steps = extra_weights.max().item()
         tgt_idx = left_idx
         src_feats = input * beta
@@ -111,19 +144,24 @@ def cif_function(
         # training time -> ignore tail
         output = output[:, :T, :]
     else:
-        # (B, S) -> (B,)
-        tail_weights = right_weight[right_idx == feat_lengths]
+        # find out contribution to output tail
+        # note: w/o scaling, extra weight is all 0
+        zero = right_weight.new_zeros((1,))
+        r_mask = right_idx == feat_lengths.unsqueeze(1)
+        tail_weights = torch.where(r_mask, right_weight, zero).sum(-1)
+        l_mask = left_idx == feat_lengths.unsqueeze(1)
+        tail_weights += torch.where(l_mask, left_weight, zero).sum(-1)
 
         # a size (B,) mask that removes non-firing position
         tail_mask = tail_weights < (beta / (2 + eps))
-        feat_lengths[tail_mask].subtract_(1)
 
-        if feat_lengths.max() < T:
-            T = feat_lengths.max()
-            output = output[:, :T, :]
+        # extend 1 fire
+        feat_lengths[~tail_mask].add_(1)
+        T = feat_lengths.max()
+        output = output[:, :T, :]
 
         # a size (B, T) mask to erase weights
         tail_mask = torch.arange(T, device=output.device).unsqueeze(0) >= feat_lengths.unsqueeze(1)
         output[tail_mask] = 0
 
-    return output, feat_lengths, alpha_sum
+    return output, feat_lengths, alpha_sum.to(dtype)
