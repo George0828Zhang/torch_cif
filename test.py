@@ -30,7 +30,7 @@ class CIFTest(TestCase):
         padding_mask: Optional[Tensor] = None,
         target_lengths: Optional[Tensor] = None,
         max_output_length: Optional[int] = None,
-        eps: float = 1e-4,
+        eps: float = 1e-6,
     ) -> Tensor:
         B, S, C = input.size()
 
@@ -39,17 +39,18 @@ class CIFTest(TestCase):
 
         if target_lengths is not None:
             feat_lengths = target_lengths.long()
-            desired_sum = beta * target_lengths.type_as(input)
+            desired_sum = beta * target_lengths.type_as(input) + eps
             alpha_sum = alpha.sum(1)
             alpha = alpha * (desired_sum / alpha_sum).unsqueeze(1)
             T = feat_lengths.max()
         else:
             alpha_sum = alpha.sum(1)
             # make sure the output lengths are valid
-            desired_sum = beta * alpha_sum.clip(min=1, max=max_output_length)
+            max_sum = None if max_output_length is None else (max_output_length * beta)
+            desired_sum = alpha_sum.clip(min=beta, max=max_sum) + eps
             alpha = alpha * (desired_sum / alpha_sum).unsqueeze(1)
-            alpha_sum = alpha.sum(1)
-            feat_lengths = (alpha_sum / beta + eps).floor().long()
+            alpha_sum = desired_sum
+            feat_lengths = (alpha_sum / beta).floor().long()
             T = feat_lengths.max()
 
         output = input.new_zeros((B, T + 1, C))
@@ -81,7 +82,7 @@ class CIFTest(TestCase):
 
             if target_lengths is None:
                 output[b, T] = 0
-            elif tail_idx > 0 and csum < (beta / (2 + eps)):
+            elif tail_idx > 0 and csum < (beta / 2):
                 output[b, tail_idx:] = 0
 
         # tail handling

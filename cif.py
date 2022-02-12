@@ -27,7 +27,7 @@ def cif_function(
     padding_mask: Optional[Tensor] = None,
     target_lengths: Optional[Tensor] = None,
     max_output_length: Optional[int] = None,
-    eps: float = 1e-4,
+    eps: float = 1e-6,
 ) -> Tuple[Tensor, Tensor, Tensor]:
     r""" A batched computation implementation of continuous integrate and fire (CIF)
     https://arxiv.org/abs/1905.11235
@@ -64,24 +64,25 @@ def cif_function(
 
     if target_lengths is not None:
         feat_lengths = target_lengths.long()
-        desired_sum = beta * target_lengths.type_as(input)
+        desired_sum = beta * target_lengths.type_as(input) + eps
         alpha_sum = alpha.sum(1)
         alpha = alpha * (desired_sum / alpha_sum).unsqueeze(1)
         T = feat_lengths.max()
     else:
         alpha_sum = alpha.sum(1)
         # make sure the output lengths are valid
-        desired_sum = beta * alpha_sum.clip(min=1, max=max_output_length)
+        max_sum = None if max_output_length is None else (max_output_length * beta)
+        desired_sum = alpha_sum.clip(min=beta, max=max_sum) + eps
         alpha = alpha * (desired_sum / alpha_sum).unsqueeze(1)
-        alpha_sum = alpha.sum(1)
-        feat_lengths = (alpha_sum / beta + eps).floor().long()
+        alpha_sum = desired_sum
+        feat_lengths = (alpha_sum / beta).floor().long()
         T = feat_lengths.max()
 
     # aggregate and integrate
     csum = alpha.cumsum(-1)
     with torch.no_grad():
         # indices used for scattering
-        right_idx = (csum / beta + eps).floor().long()
+        right_idx = (csum / beta).floor().long()
         left_idx = right_idx.roll(1, dims=1)
         left_idx[:, 0] = 0
 
@@ -89,13 +90,7 @@ def cif_function(
         fire_num = right_idx - left_idx
         extra_weights = (fire_num - 1).clip(min=0)
 
-        if right_idx.gt(T).any():
-            import pdb
-            pdb.set_trace()
-
         assert right_idx.le(T).all(), f"{right_idx} <= {T}"
-        assert left_idx.le(T).all(), f"{right_idx} <= {T}"
-        assert extra_weights.ge(0).all()
 
     # The extra entry in last dim is for
     output = input.new_zeros((B, T + 1, C))
@@ -107,6 +102,7 @@ def cif_function(
         csum - right_idx.type_as(alpha) * beta,
         alpha
     ).type_as(input)
+    # assert right_weight.ge(0).all(), f"{right_weight} should be non-negative."
     output.scatter_add_(
         1,
         right_idx.unsqueeze(-1).expand(-1, -1, C),
@@ -153,7 +149,7 @@ def cif_function(
         tail_weights += torch.where(l_mask, left_weight, zero).sum(-1)
 
         # a size (B,) mask that removes non-firing position
-        tail_mask = tail_weights < (beta / (2 + eps))
+        tail_mask = tail_weights < (beta / 2)
 
         # extend 1 fire
         feat_lengths[~tail_mask].add_(1)
