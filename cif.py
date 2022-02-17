@@ -28,8 +28,8 @@ def cif_function(
     target_lengths: Optional[Tensor] = None,
     max_output_length: Optional[int] = None,
     eps: float = 1e-6,
-) -> Tuple[Tensor, Tensor, Tensor]:
-    r""" A batched computation implementation of continuous integrate and fire (CIF)
+) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+    r""" A fast parallel implementation of continuous integrate-and-fire (CIF)
     https://arxiv.org/abs/1905.11235
 
     Args:
@@ -46,11 +46,13 @@ def cif_function(
         eps (float, optional): Epsilon to prevent underflow for divisions.
             Default: 1e-4
 
-    Returns: Tuple (output, feat_lengths, alpha_sum)
+    Returns: Tuple (output, feat_lengths, alpha_sum, delays)
         output (Tensor): (N, T, C) The output integrated from the source.
         feat_lengths (Tensor): (N,) The output length for each element in batch.
         alpha_sum (Tensor): (N,) The sum of alpha for each element in batch.
             Can be used to compute the quantity loss.
+        delays (Tensor): (N, T) The expected delay (in terms of source tokens) for
+            each target tokens in the batch.
     """
     B, S, C = input.size()
     assert tuple(alpha.size()) == (B, S), f"{alpha.size()} != {(B, S)}"
@@ -94,19 +96,27 @@ def cif_function(
 
     # The extra entry in last dim is for
     output = input.new_zeros((B, T + 1, C))
+    delay = input.new_zeros((B, T + 1))
+    source_range = torch.arange(0, S).unsqueeze(0).type_as(input)
+    zero = alpha.new_zeros((1,))
 
     # right scatter
     fire_mask = fire_num > 0
     right_weight = torch.where(
         fire_mask,
         csum - right_idx.type_as(alpha) * beta,
-        alpha
+        zero
     ).type_as(input)
     # assert right_weight.ge(0).all(), f"{right_weight} should be non-negative."
     output.scatter_add_(
         1,
         right_idx.unsqueeze(-1).expand(-1, -1, C),
         right_weight.unsqueeze(-1) * input
+    )
+    delay.scatter_add_(
+        1,
+        right_idx,
+        right_weight * source_range / beta
     )
 
     # left scatter
@@ -118,6 +128,11 @@ def cif_function(
         left_idx.unsqueeze(-1).expand(-1, -1, C),
         left_weight.unsqueeze(-1) * input
     )
+    delay.scatter_add_(
+        1,
+        left_idx,
+        left_weight * source_range / beta
+    )
 
     # extra scatters
     if extra_weights.ge(0).any():
@@ -127,11 +142,16 @@ def cif_function(
         for _ in range(extra_steps):
             tgt_idx = (tgt_idx + 1).clip(max=T)
             # (B, S, 1)
-            src_mask = (extra_weights > 0).unsqueeze(2)
+            src_mask = (extra_weights > 0)
             output.scatter_add_(
                 1,
                 tgt_idx.unsqueeze(-1).expand(-1, -1, C),
-                src_feats * src_mask
+                src_feats * src_mask.unsqueeze(2)
+            )
+            delay.scatter_add_(
+                1,
+                tgt_idx,
+                source_range * src_mask
             )
             extra_weights -= 1
 
@@ -139,6 +159,7 @@ def cif_function(
     if target_lengths is not None:
         # training time -> ignore tail
         output = output[:, :T, :]
+        delay = delay[:, :T]
     else:
         # find out contribution to output tail
         # note: w/o scaling, extra weight is all 0
@@ -155,9 +176,10 @@ def cif_function(
         feat_lengths[~tail_mask].add_(1)
         T = feat_lengths.max()
         output = output[:, :T, :]
+        delay = delay[:, :T]
 
         # a size (B, T) mask to erase weights
         tail_mask = torch.arange(T, device=output.device).unsqueeze(0) >= feat_lengths.unsqueeze(1)
         output[tail_mask] = 0
 
-    return output, feat_lengths, alpha_sum.to(dtype)
+    return output, feat_lengths, alpha_sum.to(dtype), delay
