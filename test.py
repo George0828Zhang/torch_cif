@@ -27,10 +27,9 @@ class CIFTest(TestCase):
         input: Tensor,
         alpha: Tensor,
         beta: float = 1.0,
+        tail_thres: float = 0.5,
         padding_mask: Optional[Tensor] = None,
         target_lengths: Optional[Tensor] = None,
-        min_output_length: Optional[int] = None,
-        max_output_length: Optional[int] = None,
         eps: float = 1e-6,
     ) -> Tensor:
         B, S, C = input.size()
@@ -45,13 +44,8 @@ class CIFTest(TestCase):
             alpha = alpha * (desired_sum / alpha_sum).unsqueeze(1)
             T = feat_lengths.max()
         else:
+            alpha = alpha + eps
             alpha_sum = alpha.sum(1)
-            # make sure the output lengths are valid
-            min_sum = 0 if min_output_length is None else (min_output_length * beta)
-            max_sum = 1e8 if max_output_length is None else (max_output_length * beta)
-            desired_sum = alpha_sum.clip(min=min_sum, max=max_sum) + eps
-            alpha = alpha * (desired_sum / alpha_sum).unsqueeze(1)
-            alpha_sum = desired_sum
             feat_lengths = (alpha_sum / beta).floor().long()
             T = feat_lengths.max()
 
@@ -85,7 +79,9 @@ class CIFTest(TestCase):
                     csum = 0
                     dst_idx += 1
 
-            if csum < (beta / 2):
+            if csum >= tail_thres:
+                output[b, tail_idx] *= beta / csum
+            else:
                 output[b, tail_idx:] = 0
 
         # tail handling
@@ -140,16 +136,15 @@ class CIFTest(TestCase):
         y = y.cpu().detach().numpy()
         dy = dy.cpu().detach().numpy()
 
-        x, _, _, dx = self._test_custom_cif_impl(
+        x_out = self._test_custom_cif_impl(
             input,
             alpha,
             beta,
             padding_mask=padding_mask,
-            target_lengths=target_lengths,
-            max_output_length=1024
+            target_lengths=target_lengths
         )
-        x = x.cpu().detach().numpy()
-        dx = dx.cpu().detach().numpy()
+        x = x_out['cif_out'][0].cpu().detach().numpy()
+        dx = x_out['delays'][0].cpu().detach().numpy()
         np.testing.assert_allclose(
             x,
             y,
@@ -173,14 +168,14 @@ class CIFTest(TestCase):
         y2 = y2.cpu().detach().numpy()
         dy2 = dy2.cpu().detach().numpy()
 
-        x2, _, _, dx2 = self._test_custom_cif_impl(
+        x2_out = self._test_custom_cif_impl(
             input,
             alpha,
             beta,
             padding_mask=padding_mask
         )
-        x2 = x2.cpu().detach().numpy()
-        dx2 = dx2.cpu().detach().numpy()
+        x2 = x2_out['cif_out'][0].cpu().detach().numpy()
+        dx2 = x2_out['delays'][0].cpu().detach().numpy()
         np.testing.assert_allclose(
             x2,
             y2,

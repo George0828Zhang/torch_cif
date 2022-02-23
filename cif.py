@@ -24,11 +24,9 @@ def cif_function(
     input: Tensor,
     alpha: Tensor,
     beta: float = 1.0,
+    tail_thres: float = 0.5,
     padding_mask: Optional[Tensor] = None,
     target_lengths: Optional[Tensor] = None,
-    min_output_length: Optional[int] = None,
-    max_output_length: Optional[int] = None,
-    keep_all_tails: bool = False,
     eps: float = 1e-6,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
     r""" A fast parallel implementation of continuous integrate-and-fire (CIF)
@@ -39,6 +37,7 @@ def cif_function(
         alpha (Tensor): (N, S) Weights corresponding to each elements in the
             input. It is expected to be after sigmoid function.
         beta (float): the threshold used for determine firing.
+        tail_thres (float): the threshold for determine firing for tail handling.
         padding_mask (Tensor, optional): (N, S) A binary mask representing
             padded elements in the input.
         target_lengths (Tensor, optional): (N,) Desired length of the targets
@@ -46,21 +45,14 @@ def cif_function(
         eps (float, optional): Epsilon to prevent underflow for divisions.
             Default: 1e-4
 
-    Inference Only:
-        min_output_length (int, optional): The minimum valid output length used
-            in inference. The alpha is scaled up if the sum is below this value.
-        max_output_length (int, optional): The maximum valid output length used
-            in inference. The alpha is scaled down if the sum exceeds this value.
-        keep_all_tails (bool, optional): Whether to keep the tail regardless of 
-            their weights.
-
-    Returns: Tuple (output, feat_lengths, alpha_sum, delays)
-        output (Tensor): (N, T, C) The output integrated from the source.
-        feat_lengths (Tensor): (N,) The output length for each element in batch.
+    Returns -> Dict[str, List[Optional[Tensor]]]: Key/values described below.
+        cif_out (Tensor): (N, T, C) The output integrated from the source.
+        cif_lengths (Tensor): (N,) The output length for each element in batch.
         alpha_sum (Tensor): (N,) The sum of alpha for each element in batch.
             Can be used to compute the quantity loss.
         delays (Tensor): (N, T) The expected delay (in terms of source tokens) for
             each target tokens in the batch.
+        tail_weights (Tensor, optional): (N,) During inference, return the tail.
     """
     B, S, C = input.size()
     assert tuple(alpha.size()) == (B, S), f"{alpha.size()} != {(B, S)}"
@@ -79,13 +71,8 @@ def cif_function(
         alpha = alpha * (desired_sum / alpha_sum).unsqueeze(1)
         T = feat_lengths.max()
     else:
+        alpha = alpha + eps
         alpha_sum = alpha.sum(1)
-        # make sure the output lengths are valid
-        min_sum = 0 if min_output_length is None else (min_output_length * beta)
-        max_sum = 1e8 if max_output_length is None else (max_output_length * beta)
-        desired_sum = alpha_sum.clip(min=min_sum, max=max_sum) + eps
-        alpha = alpha * (desired_sum / alpha_sum).unsqueeze(1)
-        alpha_sum = desired_sum
         feat_lengths = (alpha_sum / beta).floor().long()
         T = feat_lengths.max()
 
@@ -169,7 +156,6 @@ def cif_function(
         # training time -> ignore tail
         output = output[:, :T, :]
         delay = delay[:, :T]
-        tail_weights = None
     else:
         # find out contribution to output tail
         # note: w/o scaling, extra weight is all 0
@@ -179,27 +165,23 @@ def cif_function(
         l_mask = left_idx == feat_lengths.unsqueeze(1)
         tail_weights += torch.where(l_mask, left_weight, zero).sum(-1)
 
-        # a size (B,) mask that removes non-firing position
-        if keep_all_tails:
-            extend_mask = feat_lengths.new_ones((B,))
-        else:
-            extend_mask = tail_weights >= (beta / 2)
+        # a size (B,) mask that extends position that passed threshold.
+        extend_mask = tail_weights >= tail_thres
 
-        # # extend 1 fire and upscale the weights
-        # one = zero.fill_(1.0)
-        # upscaling = torch.where(
-        #     tail_weights > eps,
-        #     one / tail_weights,
-        #     one,  # don't upscale
-        # )
-        # output.scatter_(
-        #     1,
-        #     (feat_lengths - 1).view(B, 1, 1).expand(-1, -1, C),
-        #     upscaling.view(B, 1, 1).expand(-1, -1, C),
-        #     reduce='multiply'
-        # )
-        feat_lengths += extend_mask.long()
-        T = feat_lengths.max()
+        # extend 1 fire and upscale the weights
+        if extend_mask.any():
+            # (B, T, C), may have infs so need the mask
+            upscale = (
+                torch.ones_like(output)
+                .scatter(
+                    1,
+                    feat_lengths.view(B, 1, 1).expand(-1, -1, C),
+                    beta / tail_weights.view(B, 1, 1).expand(-1, -1, C),
+                )
+            )
+            output[extend_mask] *= upscale[extend_mask]
+            feat_lengths += extend_mask.long()
+            T = feat_lengths.max()
         output = output[:, :T, :]
         delay = delay[:, :T]
 
@@ -207,11 +189,10 @@ def cif_function(
         tail_mask = torch.arange(T, device=output.device).unsqueeze(0) >= feat_lengths.unsqueeze(1)
         output[tail_mask] = 0
 
-    return output, feat_lengths, alpha_sum.to(dtype), delay
     return {
         "cif_out": [output],
         "cif_lengths": [feat_lengths],
         "alpha_sum": [alpha_sum.to(dtype)],
         "delays": [delay],
-        "tail_weights": [tail_weights]
+        "tail_weights": [tail_weights] if target_lengths is None else []
     }
