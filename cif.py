@@ -26,7 +26,9 @@ def cif_function(
     beta: float = 1.0,
     padding_mask: Optional[Tensor] = None,
     target_lengths: Optional[Tensor] = None,
+    min_output_length: Optional[int] = None,
     max_output_length: Optional[int] = None,
+    keep_all_tails: bool = False,
     eps: float = 1e-6,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
     r""" A fast parallel implementation of continuous integrate-and-fire (CIF)
@@ -41,10 +43,16 @@ def cif_function(
             padded elements in the input.
         target_lengths (Tensor, optional): (N,) Desired length of the targets
             for each sample in the minibatch.
-        max_output_length (int, optional): The maximum valid output length used
-            in inference. The alpha is scaled down if the sum exceeds this value.
         eps (float, optional): Epsilon to prevent underflow for divisions.
             Default: 1e-4
+
+    Inference Only:
+        min_output_length (int, optional): The minimum valid output length used
+            in inference. The alpha is scaled up if the sum is below this value.
+        max_output_length (int, optional): The maximum valid output length used
+            in inference. The alpha is scaled down if the sum exceeds this value.
+        keep_all_tails (bool, optional): Whether to keep the tail regardless of 
+            their weights.
 
     Returns: Tuple (output, feat_lengths, alpha_sum, delays)
         output (Tensor): (N, T, C) The output integrated from the source.
@@ -73,8 +81,9 @@ def cif_function(
     else:
         alpha_sum = alpha.sum(1)
         # make sure the output lengths are valid
-        max_sum = None if max_output_length is None else (max_output_length * beta)
-        desired_sum = alpha_sum.clip(min=beta, max=max_sum) + eps
+        min_sum = 0 if min_output_length is None else (min_output_length * beta)
+        max_sum = 1e8 if max_output_length is None else (max_output_length * beta)
+        desired_sum = alpha_sum.clip(min=min_sum, max=max_sum) + eps
         alpha = alpha * (desired_sum / alpha_sum).unsqueeze(1)
         alpha_sum = desired_sum
         feat_lengths = (alpha_sum / beta).floor().long()
@@ -160,6 +169,7 @@ def cif_function(
         # training time -> ignore tail
         output = output[:, :T, :]
         delay = delay[:, :T]
+        tail_weights = None
     else:
         # find out contribution to output tail
         # note: w/o scaling, extra weight is all 0
@@ -170,10 +180,25 @@ def cif_function(
         tail_weights += torch.where(l_mask, left_weight, zero).sum(-1)
 
         # a size (B,) mask that removes non-firing position
-        tail_mask = tail_weights < (beta / 2)
+        if keep_all_tails:
+            extend_mask = feat_lengths.new_ones((B,))
+        else:
+            extend_mask = tail_weights >= (beta / 2)
 
-        # extend 1 fire
-        feat_lengths[~tail_mask].add_(1)
+        # # extend 1 fire and upscale the weights
+        # one = zero.fill_(1.0)
+        # upscaling = torch.where(
+        #     tail_weights > eps,
+        #     one / tail_weights,
+        #     one,  # don't upscale
+        # )
+        # output.scatter_(
+        #     1,
+        #     (feat_lengths - 1).view(B, 1, 1).expand(-1, -1, C),
+        #     upscaling.view(B, 1, 1).expand(-1, -1, C),
+        #     reduce='multiply'
+        # )
+        feat_lengths += extend_mask.long()
         T = feat_lengths.max()
         output = output[:, :T, :]
         delay = delay[:, :T]
@@ -183,3 +208,10 @@ def cif_function(
         output[tail_mask] = 0
 
     return output, feat_lengths, alpha_sum.to(dtype), delay
+    return {
+        "cif_out": [output],
+        "cif_lengths": [feat_lengths],
+        "alpha_sum": [alpha_sum.to(dtype)],
+        "delays": [delay],
+        "tail_weights": [tail_weights]
+    }
