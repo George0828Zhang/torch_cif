@@ -27,7 +27,7 @@ def cif_function(
     tail_thres: float = 0.5,
     padding_mask: Optional[Tensor] = None,
     target_lengths: Optional[Tensor] = None,
-    eps: float = 1e-6,
+    eps: float = 1e-4,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
     r""" A fast parallel implementation of continuous integrate-and-fire (CIF)
     https://arxiv.org/abs/1905.11235
@@ -71,7 +71,6 @@ def cif_function(
         alpha = alpha * (desired_sum / alpha_sum).unsqueeze(1)
         T = feat_lengths.max()
     else:
-        alpha = alpha + eps
         alpha_sum = alpha.sum(1)
         feat_lengths = (alpha_sum / beta).floor().long()
         T = feat_lengths.max()
@@ -87,8 +86,6 @@ def cif_function(
         # count # of fires from each source
         fire_num = right_idx - left_idx
         extra_weights = (fire_num - 1).clip(min=0)
-
-        assert right_idx.le(T).all(), f"{right_idx} <= {T}"
 
     # The extra entry in last dim is for
     output = input.new_zeros((B, T + 1, C))

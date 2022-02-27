@@ -1,6 +1,5 @@
 import unittest
 import torch
-import numpy as np
 from typing import Optional
 from torch import Tensor
 from cif import (
@@ -30,7 +29,7 @@ class CIFTest(TestCase):
         tail_thres: float = 0.5,
         padding_mask: Optional[Tensor] = None,
         target_lengths: Optional[Tensor] = None,
-        eps: float = 1e-6,
+        eps: float = 1e-4,
     ) -> Tensor:
         B, S, C = input.size()
 
@@ -44,7 +43,6 @@ class CIFTest(TestCase):
             alpha = alpha * (desired_sum / alpha_sum).unsqueeze(1)
             T = feat_lengths.max()
         else:
-            alpha = alpha + eps
             alpha_sum = alpha.sum(1)
             feat_lengths = (alpha_sum / beta).floor().long()
             T = feat_lengths.max()
@@ -133,8 +131,6 @@ class CIFTest(TestCase):
             padding_mask=padding_mask,
             target_lengths=target_lengths
         )
-        y = y.cpu().detach().numpy()
-        dy = dy.cpu().detach().numpy()
 
         x_out = self._test_custom_cif_impl(
             input,
@@ -143,15 +139,15 @@ class CIFTest(TestCase):
             padding_mask=padding_mask,
             target_lengths=target_lengths
         )
-        x = x_out['cif_out'][0].cpu().detach().numpy()
-        dx = x_out['delays'][0].cpu().detach().numpy()
-        np.testing.assert_allclose(
+        x = x_out['cif_out'][0]
+        dx = x_out['delays'][0]
+        torch.testing.assert_allclose(
             x,
             y,
             atol=1e-3,
             rtol=1e-3,
         )
-        np.testing.assert_allclose(
+        torch.testing.assert_allclose(
             dx,
             dy,
             atol=1e-3,
@@ -165,8 +161,6 @@ class CIFTest(TestCase):
             beta,
             padding_mask=padding_mask
         )
-        y2 = y2.cpu().detach().numpy()
-        dy2 = dy2.cpu().detach().numpy()
 
         x2_out = self._test_custom_cif_impl(
             input,
@@ -174,15 +168,15 @@ class CIFTest(TestCase):
             beta,
             padding_mask=padding_mask
         )
-        x2 = x2_out['cif_out'][0].cpu().detach().numpy()
-        dx2 = x2_out['delays'][0].cpu().detach().numpy()
-        np.testing.assert_allclose(
+        x2 = x2_out['cif_out'][0]
+        dx2 = x2_out['delays'][0]
+        torch.testing.assert_allclose(
             x2,
             y2,
             atol=1e-3,
             rtol=1e-3,
         )
-        np.testing.assert_allclose(
+        torch.testing.assert_allclose(
             dx2,
             dy2,
             atol=1e-3,
