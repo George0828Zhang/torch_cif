@@ -90,7 +90,7 @@ def cif_function(
     # The extra entry in last dim is for
     output = input.new_zeros((B, T + 1, C))
     delay = input.new_zeros((B, T + 1))
-    source_range = torch.arange(0, S).unsqueeze(0).type_as(input)
+    source_range = torch.arange(1, 1 + S).unsqueeze(0).type_as(input)
     zero = alpha.new_zeros((1,))
 
     # right scatter

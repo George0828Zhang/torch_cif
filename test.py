@@ -64,7 +64,7 @@ class CIFTest(TestCase):
                 if csum + alpha[b, src_idx] < beta:
                     csum += alpha[b, src_idx]
                     output[b, dst_idx] += alpha[b, src_idx] * input[b, src_idx]
-                    delay[b, dst_idx] += alpha[b, src_idx] * src_idx / beta
+                    delay[b, dst_idx] += alpha[b, src_idx] * (1 + src_idx) / beta
                     tail_idx = dst_idx
                     alpha[b, src_idx] = 0
                     src_idx += 1
@@ -72,7 +72,7 @@ class CIFTest(TestCase):
                     fire_w = beta - csum
                     alpha[b, src_idx] -= fire_w
                     output[b, dst_idx] += fire_w * input[b, src_idx]
-                    delay[b, dst_idx] += fire_w * src_idx / beta
+                    delay[b, dst_idx] += fire_w * (1 + src_idx) / beta
                     tail_idx = dst_idx
                     csum = 0
                     dst_idx += 1
