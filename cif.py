@@ -79,7 +79,7 @@ def cif_function(
     csum = alpha.cumsum(-1)
     with torch.no_grad():
         # indices used for scattering
-        right_idx = (csum / beta).floor().long()
+        right_idx = (csum / beta).floor().long().clip(max=T)
         left_idx = right_idx.roll(1, dims=1)
         left_idx[:, 0] = 0
 
