@@ -173,10 +173,11 @@ def cif_function(
                 .scatter(
                     1,
                     feat_lengths.view(B, 1, 1).expand(-1, -1, C),
-                    beta / tail_weights.view(B, 1, 1).expand(-1, -1, C),
+                    beta / tail_weights.masked_fill(~extend_mask, beta).view(B, 1, 1).expand(-1, -1, C),
                 )
+                .detach()
             )
-            output[extend_mask] *= upscale[extend_mask]
+            output *= upscale
             feat_lengths += extend_mask.long()
             T = feat_lengths.max()
         output = output[:, :T, :]
