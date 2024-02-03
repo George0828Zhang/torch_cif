@@ -1,49 +1,45 @@
+"""
+This module provides the cif_function(...) method that implements parallel CIF,
+including training (with target lengths) and inference.
+- Author: Chih-Chiang Chang (github: George0828Zhang)
+"""
 import torch
 from typing import Optional, Tuple
 from torch import Tensor
 
 
-def prob_check(tensor, eps=1e-10, neg_inf=-1e8, logp=False):
-    assert not torch.isnan(tensor).any(), (
-        "Nan in a probability tensor."
-    )
-    # Add the eps here to prevent errors introduced by precision
-    if logp:
-        assert tensor.le(0).all() and tensor.ge(neg_inf).all(), (
-            "Incorrect values in a log-probability tensor"
-            ", -inf <= tensor <= 0"
-        )
-    else:
-        assert tensor.le(1.0 + eps).all() and tensor.ge(0.0 - eps).all(), (
-            "Incorrect values in a probability tensor"
-            ", 0.0 <= tensor <= 1.0"
-        )
-
-
 def cif_function(
-    input: Tensor,
+    inputs: Tensor,
     alpha: Tensor,
     beta: float = 1.0,
     tail_thres: float = 0.5,
     padding_mask: Optional[Tensor] = None,
     target_lengths: Optional[Tensor] = None,
     eps: float = 1e-4,
+    unbound_alpha: bool = False
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
     r""" A fast parallel implementation of continuous integrate-and-fire (CIF)
     https://arxiv.org/abs/1905.11235
 
+    Shapes:
+        N: batch size
+        S: source (encoder) sequence length
+        C: source feature dimension
+        T: target sequence length
+
     Args:
-        input (Tensor): (N, S, C) Input features to be integrated.
+        inputs (Tensor): (N, S, C) Input features to be integrated.
         alpha (Tensor): (N, S) Weights corresponding to each elements in the
-            input. It is expected to be after sigmoid function.
+            inputs. It is expected to be after sigmoid function.
         beta (float): the threshold used for determine firing.
         tail_thres (float): the threshold for determine firing for tail handling.
         padding_mask (Tensor, optional): (N, S) A binary mask representing
-            padded elements in the input.
+            padded elements in the inputs.
         target_lengths (Tensor, optional): (N,) Desired length of the targets
             for each sample in the minibatch.
         eps (float, optional): Epsilon to prevent underflow for divisions.
             Default: 1e-4
+        unbound_alpha (bool, optional): Whether to check if 0 <= alpha <= 1.
 
     Returns -> Dict[str, List[Optional[Tensor]]]: Key/values described below.
         cif_out (Tensor): (N, T, C) The output integrated from the source.
@@ -54,9 +50,13 @@ def cif_function(
             each target tokens in the batch.
         tail_weights (Tensor, optional): (N,) During inference, return the tail.
     """
-    B, S, C = input.size()
+    B, S, C = inputs.size()
     assert tuple(alpha.size()) == (B, S), f"{alpha.size()} != {(B, S)}"
-    prob_check(alpha)
+    assert not torch.isnan(alpha).any(), "Nan in alpha tensor."
+    assert unbound_alpha or (alpha.le(1.0 + eps).all() and alpha.ge(0.0 - eps).all()), (
+        "Incorrect values in alpha tensor"
+        ", 0.0 <= tensor <= 1.0"
+    )
 
     dtype = alpha.dtype
     alpha = alpha.float()
@@ -65,8 +65,9 @@ def cif_function(
         alpha = alpha.masked_fill(padding_mask, 0)
 
     if target_lengths is not None:
+        assert target_lengths.size() == (B,)
         feat_lengths = target_lengths.long()
-        desired_sum = beta * target_lengths.type_as(input) + eps
+        desired_sum = beta * target_lengths.type_as(inputs) + eps
         alpha_sum = alpha.sum(1)
         alpha = alpha * (desired_sum / alpha_sum).unsqueeze(1)
         T = feat_lengths.max()
@@ -88,9 +89,9 @@ def cif_function(
         extra_weights = (fire_num - 1).clip(min=0)
 
     # The extra entry in last dim is for
-    output = input.new_zeros((B, T + 1, C))
-    delay = input.new_zeros((B, T + 1))
-    source_range = torch.arange(1, 1 + S).unsqueeze(0).type_as(input)
+    output = inputs.new_zeros((B, T + 1, C))
+    delay = inputs.new_zeros((B, T + 1))
+    source_range = torch.arange(1, 1 + S).unsqueeze(0).type_as(inputs)
     zero = alpha.new_zeros((1,))
 
     # right scatter
@@ -99,12 +100,12 @@ def cif_function(
         fire_mask,
         csum - right_idx.type_as(alpha) * beta,
         zero
-    ).type_as(input)
+    ).type_as(inputs)
     # assert right_weight.ge(0).all(), f"{right_weight} should be non-negative."
     output.scatter_add_(
         1,
         right_idx.unsqueeze(-1).expand(-1, -1, C),
-        right_weight.unsqueeze(-1) * input
+        right_weight.unsqueeze(-1) * inputs
     )
     delay.scatter_add_(
         1,
@@ -115,11 +116,11 @@ def cif_function(
     # left scatter
     left_weight = (
         alpha - right_weight - extra_weights.type_as(alpha) * beta
-    ).type_as(input)
+    ).type_as(inputs)
     output.scatter_add_(
         1,
         left_idx.unsqueeze(-1).expand(-1, -1, C),
-        left_weight.unsqueeze(-1) * input
+        left_weight.unsqueeze(-1) * inputs
     )
     delay.scatter_add_(
         1,
@@ -131,7 +132,7 @@ def cif_function(
     if extra_weights.ge(0).any():
         extra_steps = extra_weights.max().item()
         tgt_idx = left_idx
-        src_feats = input * beta
+        src_feats = inputs * beta
         for _ in range(extra_steps):
             tgt_idx = (tgt_idx + 1).clip(max=T)
             # (B, S, 1)

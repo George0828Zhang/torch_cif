@@ -112,7 +112,7 @@ if __name__ == "__main__":
 
     t1 = benchmark.Timer(
         stmt='cif_function(input,alpha,beta,padding_mask=padding_mask,target_lengths=target_lengths)',
-        setup='from cif import cif_function',
+        setup='from torch_cif import cif_function',
         globals=globals,
         num_threads=num_threads
     )

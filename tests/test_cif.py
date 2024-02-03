@@ -2,9 +2,7 @@ import unittest
 import torch
 from typing import Optional
 from torch import Tensor
-from cif import (
-    cif_function
-)
+from torch_cif import cif_function
 
 import hypothesis.strategies as st
 from hypothesis import assume, given, settings
@@ -20,7 +18,7 @@ def lengths_to_padding_mask(lens):
     return mask
 
 
-class CIFTest(TestCase):
+class TestCIF(TestCase):
     def _test_cif_ref(
         self,
         input: Tensor,
@@ -104,7 +102,7 @@ class CIFTest(TestCase):
         beta=st.floats(0.5, 1.5),
         device=st.sampled_from(["cpu", "cuda"]),
     )
-    def test_cif_impl(self, B, T, S, C, beta, device):
+    def test_cif(self, B, T, S, C, beta, device):
 
         assume(device == "cpu" or TEST_CUDA)
 
@@ -141,13 +139,13 @@ class CIFTest(TestCase):
         )
         x = x_out['cif_out'][0]
         dx = x_out['delays'][0]
-        torch.testing.assert_allclose(
+        torch.testing.assert_close(
             x,
             y,
             atol=1e-3,
             rtol=1e-3,
         )
-        torch.testing.assert_allclose(
+        torch.testing.assert_close(
             dx,
             dy,
             atol=1e-3,
@@ -170,13 +168,13 @@ class CIFTest(TestCase):
         )
         x2 = x2_out['cif_out'][0]
         dx2 = x2_out['delays'][0]
-        torch.testing.assert_allclose(
+        torch.testing.assert_close(
             x2,
             y2,
             atol=1e-3,
             rtol=1e-3,
         )
-        torch.testing.assert_allclose(
+        torch.testing.assert_close(
             dx2,
             dy2,
             atol=1e-3,
