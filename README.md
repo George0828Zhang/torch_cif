@@ -3,7 +3,7 @@
 A fast parallel implementation pure PyTorch implementation of *"CIF: Continuous Integrate-and-Fire for End-to-End Speech Recognition"*  https://arxiv.org/abs/1905.11235.
 
 ## Installation
-### PYPI
+### PyPI
 ```bash
 pip install torch-cif
 ```
@@ -25,7 +25,7 @@ def cif_function(
     target_lengths: Optional[Tensor] = None,
     eps: float = 1e-4,
     unbound_alpha: bool = False
-) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+) -> Dict[str, List[Tensor]]:
     r""" A fast parallel implementation of continuous integrate-and-fire (CIF)
     https://arxiv.org/abs/1905.11235
 
@@ -42,21 +42,27 @@ def cif_function(
         beta (float): the threshold used for determine firing.
         tail_thres (float): the threshold for determine firing for tail handling.
         padding_mask (Tensor, optional): (N, S) A binary mask representing
-            padded elements in the inputs.
+            padded elements in the inputs. 1 is padding, 0 is not.
         target_lengths (Tensor, optional): (N,) Desired length of the targets
             for each sample in the minibatch.
         eps (float, optional): Epsilon to prevent underflow for divisions.
             Default: 1e-4
         unbound_alpha (bool, optional): Whether to check if 0 <= alpha <= 1.
 
-    Returns -> Dict[str, List[Optional[Tensor]]]: Key/values described below.
-        cif_out (Tensor): (N, T, C) The output integrated from the source.
-        cif_lengths (Tensor): (N,) The output length for each element in batch.
-        alpha_sum (Tensor): (N,) The sum of alpha for each element in batch.
+    Returns -> Dict[str, List[Tensor]]: Key/values described below.
+        cif_out: (N, T, C) The output integrated from the source.
+        cif_lengths: (N,) The output length for each element in batch.
+        alpha_sum: (N,) The sum of alpha for each element in batch.
             Can be used to compute the quantity loss.
-        delays (Tensor): (N, T) The expected delay (in terms of source tokens) for
+        delays: (N, T) The expected delay (in terms of source tokens) for
             each target tokens in the batch.
-        tail_weights (Tensor, optional): (N,) During inference, return the tail.
+        tail_weights: (N,) During inference, return the tail.
+        scaled_alpha: (N, S) alpha after applying weight scaling.
+        cumsum_alpha: (N, S) cumsum of alpha after scaling.
+        right_indices: (N, S) right scatter indices, or floor(cumsum(alpha)).
+        right_weights: (N, S) right scatter weights.
+        left_indices: (N, S) left scatter indices.
+        left_weights: (N, S) left scatter weights.
     """
 ```
 
